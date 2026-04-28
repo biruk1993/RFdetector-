@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RF Signal Detector</title>
+    
+    <!-- PWA Manifest -->
+    <link rel="manifest" href="data:application/json,{'name':'RF%20Detector','short_name':'RFDet','start_url':'.','display':'standalone','background_color':'%231a1a2e','theme_color':'%23e94560'}">
+    
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { 
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #1a1a2e; color: #eee; height: 100vh; display: flex; flex-direction: column;
+        }
+        #map { flex: 1; min-height: 50vh; }
+        #panel { 
+            height: 40vh; background: #16213e; display: flex; flex-direction: column;
+        }
+        #header {
+            padding: 12px 15px; background: #0f3460; display: flex; 
+            justify-content: space-between; align-items: center;
+        }
+        #header h3 { font-size: 16px; }
+        #count {
+            background: #e94560; padding: 4px 12px; border-radius: 15px;
+            font-size: 14px; font-weight: bold;
+        }
+        #signals { 
+            flex: 1; overflow-y: auto; padding: 10px;
+        }
+        .signal {
+            background: #1a1a2e; margin-bottom: 8px; padding: 12px;
+            border-radius: 10px; border-left: 4px solid #e94560;
+            cursor: pointer; transition: background 0.2s;
+        }
+        .signal:active { background: #0f3460; }
+        .signal-type { color: #e94560; font-weight: bold; font-size: 16px; margin-bottom: 5px; }
+        .signal-info { color: #aaa; font-size: 13px; display: flex; flex-wrap: wrap; gap: 10px; }
+        #controls {
+            display: flex; gap: 10px; padding: 10px; background: #0f3460;
+        }
+        #controls button {
+            flex: 1; padding: 12px; border: none; border-radius: 8px;
+            font-weight: bold; font-size: 15px; cursor: pointer;
+        }
+        #scanBtn { background: #e94560; color: white; }
+        #clearBtn { background: #1a1a2e; color: #aaa; border: 1px solid #555; }
+        .empty { text-align: center; padding: 30px; color: #666; font-size: 14px; }
+    </style>
+</head>
+<body>
+    <div id="map"></div>
+    
+    <div id="panel">
+        <div id="header">
+            <h3>📡 Detected Signals</h3>
+            <span id="count">0</span>
+        </div>
+        <div id="signals">
+            <div class="empty">Press Start Scanning to detect signals</div>
+        </div>
+    </div>
+    
+    <div id="controls">
+        <button id="scanBtn" onclick="toggleScan()">🔍 Start Scanning</button>
+        <button id="clearBtn" onclick="clearSignals()">🗑️ Clear</button>
+    </div>
+    
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    
+    <script>
+        // Global variables
+        var map, userMarker, signals = [], isScanning = false, scanInterval;
+        var compassHeading = 0;
+        
+        // Initialize everything
+        function init() {
+            initMap();
+            initCompass();
+        }
+        
+        // Initialize OpenStreetMap
+        function initMap() {
+            map = L.map('map', {
+                center: [9.03, 38.74], // Ethiopia center
+                zoom: 13,
+                zoomControl: true
+            });
+            
+            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                attribution: '© OpenStreetMap contributors',
+                maxZoom: 19
+            }).addTo(map);
+            
+            // Get user location
+            if (navigator.geolocation) {
+                navigator.geolocation.getCurrentPosition(
+                    function(pos) {
+                        var lat = pos.coords.latitude;
+                        var lng = pos.coords.longitude;
+                        map.setView([lat, lng], 15);
+                        
+                        userMarker = L.marker([lat, lng], {
+                            title: 'Your Location'
+                        }).addTo(map).bindPopup('📍 You are here').openPopup();
+                        
+                        // Draw accuracy circle
+                        if (pos.coords.accuracy) {
+                            L.circle([lat, lng], {
+                                radius: pos.coords.accuracy,
+                                color: '#e94560',
+                                fillColor: '#e94560',
+                                fillOpacity: 0.1,
+                                weight: 1
+                            }).addTo(map);
+                        }
+                    },
+                    function(err) {
+                        console.log('GPS error: ' + err.message);
+                    },
+                    {
+                        enableHighAccuracy: true,
+                        timeout: 10000,
+                        maximumAge: 0
+                    }
+                );
+                
+                // Watch position for updates
+                navigator.geolocation.watchPosition(
+                    function(pos) {
+                        var lat = pos.coords.latitude;
+                        var lng = pos.coords.longitude;
+                        
+                        if (userMarker) {
+                            userMarker.setLatLng([lat, lng]);
+                        }
+                    },
+                    null,
+                    {
+                        enableHighAccuracy: true,
+                        maximumAge: 5000
+                    }
+                );
+            }
+        }
+        
+        // Initialize Compass
+        function initCompass() {
+            if (window.DeviceOrientationEvent) {
+                window.addEventListener('deviceorientation', function(event) {
+                    var heading;
+                    // For iOS
+                    if (event.webkitCompassHeading) {
+                        heading = event.webkitCompassHeading;
+                    }
+                    // For Android
+                    else if (event.alpha) {
+                        heading = 360 - event.alpha;
+                    }
+                    if (heading) {
+                        compassHeading = heading;
+                    }
+                }, true);
+            }
+        }
+        
+        // Toggle scanning
+        function toggleScan() {
+            isScanning = !isScanning;
+            var btn = document.getElementById('scanBtn');
+            
+            if (isScanning) {
+                btn.textContent = '⏹ Stop Scanning';
+                btn.style.background = '#555';
+                startScanning();
+            } else {
+                btn.textContent = '🔍 Start Scanning';
+                btn.style.background = '#e94560';
+                stopScanning();
+            }
+        }
+        
+        // Start scanning
+        function startScanning() {
+            scanInterval = setInterval(scanSignals, 3000);
+            scanSignals(); // Immediate first scan
+        }
+        
+        // Stop scanning
+        function stopScanning() {
+            clearInterval(scanInterval);
+        }
+        
+        // Scan for signals (simulated demo data)
+        function scanSignals() {
+            var networkTypes = [
+                { type: '4G LTE', bands: ['Band 3 (1800 MHz)', 'Band 20 (800 MHz)', 'Band 7 (2600 MHz)'] },
+                { type: '5G NR', bands: ['n78 (3500 MHz)', 'n41 (2500 MHz)', 'n28 (700 MHz)'] },
+                { type: 'GSM', bands: ['GSM 900', 'GSM 1800'] },
+                { type: 'WCDMA', bands: ['Band 1 (2100 MHz)', 'Band 8 (900 MHz)'] }
+            ];
+            
+            var net = networkTypes[Math.floor(Math.random() * networkTypes.length)];
+            var signalStrength = -(50 + Math.floor(Math.random() * 60)); // -50 to -110 dBm
+            
+            var newSignal = {
+                type: net.type,
+                band: net.bands[Math.floor(Math.random() * net.bands.length)],
+                power: signalStrength,
+                frequency: Math.floor(700 + Math.random() * 3000) + ' MHz',
+                direction: Math.floor(Math.random() * 360),
+                distance: (0.1 + Math.random() * 15).toFixed(1) + ' km',
+                timestamp: new Date().toLocaleTimeString()
+            };
+            
+            signals.unshift(newSignal);
+            
+            // Keep maximum 50 signals
+            if (signals.length > 50) {
+                signals.pop();
+            }
+            
+            updateSignalList();
+        }
+        
+        // Update the signal display
+        function updateSignalList() {
+            var countEl = document.getElementById('count');
+            var signalsEl = document.getElementById('signals');
+            
+            countEl.textContent = signals.length;
+            
+            if (signals.length === 0) {
+                signalsEl.innerHTML = '<div class="empty">No signals detected</div>';
+                return;
+            }
+            
+            var html = '';
+            signals.forEach(function(signal, index) {
+                var signalQuality = signal.power > -70 ? '🟢' : signal.power > -90 ? '🟡' : '🔴';
+                var directionDiff = signal.direction - compassHeading;
+                var arrow = '➡️';
+                if (directionDiff < -135 || directionDiff > 135) arrow = '⬅️';
+                if (directionDiff > -45 && directionDiff < 45) arrow = '⬆️';
+                if (directionDiff > 45 && directionDiff < 135) arrow = '⬇️';
+                
+                html += '<div class="signal" onclick="showDirection(' + index + ', ' + signal.direction + ')">';
+                html += '<div class="signal-type">' + signalQuality + ' ' + signal.type + ' - ' + signal.band + '</div>';
+                html += '<div class="signal-info">';
+                html += '<span>📶 ' + signal.power + ' dBm</span>';
+                html += '<span>📡 ' + signal.frequency + '</span>';
+                html += '<span>' + arrow + ' ' + signal.direction + '°</span>';
+                html += '<span>📏 ' + signal.distance + '</span>';
+                html += '</div>';
+                html += '<div style="font-size:11px;color:#555;margin-top:5px;">' + signal.timestamp + '</div>';
+                html += '</div>';
+            });
+            
+            signalsEl.innerHTML = html;
+        }
+        
+        // Show direction line on map when signal is clicked
+        function showDirection(index, direction) {
+            if (!map) return;
+            
+            var center = map.getCenter();
+            var startLat = center.lat;
+            var startLng = center.lng;
+            
+            // Calculate endpoint based on direction and distance
+            var distanceDeg = 0.01; // approximately 1km
+            var rad = direction * Math.PI / 180;
+            var endLat = startLat + (distanceDeg * Math.cos(rad));
+            var endLng = startLng + (distanceDeg * Math.sin(rad));
+            
+            // Draw direction line
+            var directionLine = L.polyline(
+                [[startLat, startLng], [endLat, endLng]],
+                {
+                    color: '#e94560',
+                    weight: 3,
+                    dashArray: '10, 10',
+                    opacity: 0.8
+                }
+            ).addTo(map);
+            
+            // Add endpoint marker
+            var endMarker = L.circleMarker([endLat, endLng], {
+                radius: 6,
+                color: '#e94560',
+                fillColor: '#e94560',
+                fillOpacity: 0.5
+            }).addTo(map);
+            
+            // Remove after 4 seconds
+            setTimeout(function() {
+                map.removeLayer(directionLine);
+                map.removeLayer(endMarker);
+            }, 4000);
+        }
+        
+        // Clear all signals
+        function clearSignals() {
+            signals = [];
+            updateSignalList();
+        }
+        
+        // Start the app when page loads
+        window.addEventListener('load', init);
+        
+        // Handle back button (don't close app)
+        window.addEventListener('popstate', function(e) {
+            history.pushState(null, null, window.location.href);
+        });
+        history.pushState(null, null, window.location.href);
+    </script>
+</body>
+</html>
